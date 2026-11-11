@@ -3,6 +3,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <sys/wait.h>
+#include <fcntl.h>
 
 char **split_line(char *line) {
     int tokens_size = 64;
@@ -57,23 +58,73 @@ char **split_line(char *line) {
 }
 
 int launch(char **args) {
-	pid_t pid;
-	int status;
+    pid_t pid;
+    int status;
 
-	pid = fork();
+    pid = fork();
 
-	if (pid == 0) {
-		execvp(args[0], args);
-		perror("sheldon");
-		exit(EXIT_FAILURE);
-	}
-	else if (pid<0) {
-		perror("fork");
-	}
-	else {
-		waitpid(pid, &status, 0);
-	}
-	return 1;
+    if (pid == 0) {
+        for (int i = 0; args[i] != NULL; i++) {
+            int target_fd = -1;
+            int flags = 0;
+
+            if (strcmp(args[i], ">") == 0) {
+                target_fd = STDOUT_FILENO;
+                flags = O_WRONLY | O_CREAT | O_TRUNC;
+            }
+            else if (strcmp(args[i], ">>") == 0) {
+                target_fd = STDOUT_FILENO;
+                flags = O_WRONLY | O_CREAT | O_APPEND;
+            }
+            else if (strcmp(args[i], "<") == 0) {
+                target_fd = STDIN_FILENO;
+                flags = O_RDONLY;
+            }
+
+            if (target_fd != -1) {
+                if (args[i + 1] == NULL) {
+                    fprintf(stderr, "sheldon: expected filename after redirection\n");
+                    exit(EXIT_FAILURE);
+                }
+
+                int fd = open(args[i + 1], flags, 0644);
+
+                if (fd < 0) {
+                    perror("sheldon");
+                    exit(EXIT_FAILURE);
+                }
+
+                if (dup2(fd, target_fd) < 0) {
+                    perror("dup2");
+                    close(fd);
+                    exit(EXIT_FAILURE);
+                }
+
+                close(fd);
+
+                int j = i;
+                while (args[j + 2] != NULL) {
+                    args[j] = args[j + 2];
+                    j++;
+                }
+                args[j] = NULL;
+
+                i--;
+            }
+        }
+
+        execvp(args[0], args);
+        perror("sheldon");
+        exit(EXIT_FAILURE);
+    }
+    else if (pid < 0) {
+        perror("fork");
+    }
+    else {
+        waitpid(pid, &status, 0);
+    }
+
+    return 1;
 }
 
 int shell_cd(char **args) {

@@ -61,3 +61,31 @@ Implement incrementally and understand every component.
 ## Next milestone
 - Input/output redirection.
 - Learn file descriptors, `open()`, `dup2()`, and `close()`.
+
+## Completed: I/O Redirection
+
+- Implemented output redirection (`>`).
+- Implemented append redirection (`>>`).
+- Implemented input redirection (`<`).
+- Used `open()` to open and create files.
+- Used `dup2()` to redirect standard input/output.
+- Used `close()` to release file descriptors.
+- Implemented redirection in the child process.
+
+### Tested commands
+
+- `echo hello > output.txt`
+- `echo world >> output.txt`
+- `cat output.txt`
+- `wc -w < output.txt`
+
+### Known limitations
+
+- Redirection operators require spaces around them.
+- Full shell parsing and advanced redirection are not supported yet.
+
+## Next milestone
+
+- Pipes (`|`).
+- Signal handling (`Ctrl+C`, `Ctrl+Z`).
+- Command history.
