@@ -39,3 +39,25 @@ exit is not implemented yet.
 ## Learning approach
 Follow Brennan's Write a Shell in C tutorial.
 Implement incrementally and understand every component.
+
+## Completed: Quote-aware tokenization
+
+- Replaced `strtok()` with a custom tokenizer.
+- Added basic double-quote support.
+- Spaces inside double quotes are preserved.
+- Supports normal arguments and multiple quoted/unquoted arguments.
+- Tested commands:
+  - `echo hello world`
+  - `echo "hello world"`
+  - `echo "hello" world`
+  - `echo "hello        world"`
+
+### Known limitations
+- Single quotes not supported.
+- Escape characters not supported.
+- Unclosed quotes are not handled.
+- Tabs are not treated as separators.
+
+## Next milestone
+- Input/output redirection.
+- Learn file descriptors, `open()`, `dup2()`, and `close()`.
