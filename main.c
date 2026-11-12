@@ -4,6 +4,8 @@
 #include <unistd.h>
 #include <sys/wait.h>
 #include <fcntl.h>
+#include <signal.h>
+#include <errno.h>
 
 char **split_line(char *line) {
     int tokens_size = 64;
@@ -58,6 +60,7 @@ char **split_line(char *line) {
 }
 
 void execute_command(char **args) {
+    signal(SIGINT, SIG_DFL);
     for (int i = 0; args[i] != NULL; i++) {
         int target_fd = -1;
         int flags = 0;
@@ -235,7 +238,18 @@ int shell_help(void) {
     return 1;
 }
 
+void handle_sigint(int sig) {
+    (void)sig;
+    write(STDOUT_FILENO, "\n", 1);
+}
+
 int main() {
+    struct sigaction sa;
+    sa.sa_handler = handle_sigint;
+    sigemptyset(&sa.sa_mask);
+    sa.sa_flags = 0;
+
+    sigaction(SIGINT, &sa, NULL);
     char *line = NULL;
     size_t bufsize = 0;
 
@@ -264,7 +278,16 @@ int main() {
         fflush(stdout);
 
         if (getline(&line, &bufsize, stdin) == -1) {
-            break;
+	    if (feof(stdin)) {
+		break;
+            }
+
+            if (errno == EINTR) {
+		clearerr(stdin);
+		continue;
+            }
+
+	    break;
         }
 
         char **args = split_line(line);
