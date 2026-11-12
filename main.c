@@ -57,72 +57,149 @@ char **split_line(char *line) {
     return tokens;
 }
 
-int launch(char **args) {
-    pid_t pid;
-    int status;
+void execute_command(char **args) {
+    for (int i = 0; args[i] != NULL; i++) {
+        int target_fd = -1;
+        int flags = 0;
 
-    pid = fork();
-
-    if (pid == 0) {
-        for (int i = 0; args[i] != NULL; i++) {
-            int target_fd = -1;
-            int flags = 0;
-
-            if (strcmp(args[i], ">") == 0) {
-                target_fd = STDOUT_FILENO;
-                flags = O_WRONLY | O_CREAT | O_TRUNC;
-            }
-            else if (strcmp(args[i], ">>") == 0) {
-                target_fd = STDOUT_FILENO;
-                flags = O_WRONLY | O_CREAT | O_APPEND;
-            }
-            else if (strcmp(args[i], "<") == 0) {
-                target_fd = STDIN_FILENO;
-                flags = O_RDONLY;
-            }
-
-            if (target_fd != -1) {
-                if (args[i + 1] == NULL) {
-                    fprintf(stderr, "sheldon: expected filename after redirection\n");
-                    exit(EXIT_FAILURE);
-                }
-
-                int fd = open(args[i + 1], flags, 0644);
-
-                if (fd < 0) {
-                    perror("sheldon");
-                    exit(EXIT_FAILURE);
-                }
-
-                if (dup2(fd, target_fd) < 0) {
-                    perror("dup2");
-                    close(fd);
-                    exit(EXIT_FAILURE);
-                }
-
-                close(fd);
-
-                int j = i;
-                while (args[j + 2] != NULL) {
-                    args[j] = args[j + 2];
-                    j++;
-                }
-                args[j] = NULL;
-
-                i--;
-            }
+        if (strcmp(args[i], ">") == 0) {
+            target_fd = STDOUT_FILENO;
+            flags = O_WRONLY | O_CREAT | O_TRUNC;
+        }
+        else if (strcmp(args[i], ">>") == 0) {
+            target_fd = STDOUT_FILENO;
+            flags = O_WRONLY | O_CREAT | O_APPEND;
+        }
+        else if (strcmp(args[i], "<") == 0) {
+            target_fd = STDIN_FILENO;
+            flags = O_RDONLY;
         }
 
-        execvp(args[0], args);
-        perror("sheldon");
-        exit(EXIT_FAILURE);
+        if (target_fd != -1) {
+            if (args[i + 1] == NULL) {
+                fprintf(stderr, "sheldon: expected filename after redirection\n");
+                exit(EXIT_FAILURE);
+            }
+
+            int fd = open(args[i + 1], flags, 0644);
+
+            if (fd < 0) {
+                perror("sheldon");
+                exit(EXIT_FAILURE);
+            }
+
+            if (dup2(fd, target_fd) < 0) {
+                perror("dup2");
+                close(fd);
+                exit(EXIT_FAILURE);
+            }
+
+            close(fd);
+
+            int j = i;
+            while (args[j + 2] != NULL) {
+                args[j] = args[j + 2];
+                j++;
+            }
+            args[j] = NULL;
+
+            i--;
+        }
     }
-    else if (pid < 0) {
+
+    execvp(args[0], args);
+    perror("sheldon");
+    exit(EXIT_FAILURE);
+}
+
+
+int launch(char **args) {
+    int pipe_index = -1;
+
+    // Find the pipe operator
+    for (int i = 0; args[i] != NULL; i++) {
+        if (strcmp(args[i], "|") == 0) {
+            if (pipe_index != -1) {
+                fprintf(stderr, "sheldon: only one pipe supported for now\n");
+                return 1;
+            }
+            pipe_index = i;
+        }
+    }
+
+    // No pipe: execute a normal command
+    if (pipe_index == -1) {
+        pid_t pid = fork();
+
+        if (pid == 0) {
+            execute_command(args);
+        }
+        else if (pid < 0) {
+            perror("fork");
+        }
+        else {
+            waitpid(pid, NULL, 0);
+        }
+
+        return 1;
+    }
+
+    // Validate both sides of the pipe
+    if (pipe_index == 0 || args[pipe_index + 1] == NULL) {
+        fprintf(stderr, "sheldon: invalid pipe syntax\n");
+        return 1;
+    }
+
+    // Separate the two commands
+    args[pipe_index] = NULL;
+    char **right_command = &args[pipe_index + 1];
+
+    int fd[2];
+
+    if (pipe(fd) < 0) {
+        perror("pipe");
+        return 1;
+    }
+
+    pid_t left_pid = fork();
+
+    if (left_pid == 0) {
+        dup2(fd[1], STDOUT_FILENO);
+        close(fd[0]);
+        close(fd[1]);
+
+        execute_command(args);
+    }
+    else if (left_pid < 0) {
         perror("fork");
+        close(fd[0]);
+        close(fd[1]);
+        return 1;
     }
-    else {
-        waitpid(pid, &status, 0);
+
+    pid_t right_pid = fork();
+
+    if (right_pid == 0) {
+        dup2(fd[0], STDIN_FILENO);
+        close(fd[0]);
+        close(fd[1]);
+
+        execute_command(right_command);
     }
+    else if (right_pid < 0) {
+        perror("fork");
+        close(fd[0]);
+        close(fd[1]);
+        waitpid(left_pid, NULL, 0);
+        return 1;
+    }
+
+    // Parent doesn't need either end of the pipe
+    close(fd[0]);
+    close(fd[1]);
+
+    waitpid(left_pid, NULL, 0);
+    waitpid(right_pid, NULL, 0);
 
     return 1;
 }

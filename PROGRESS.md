@@ -89,3 +89,10 @@ Implement incrementally and understand every component.
 - Pipes (`|`).
 - Signal handling (`Ctrl+C`, `Ctrl+Z`).
 - Command history.
+
+## Pipes
+- [x] Implemented single pipe (`|`) between two commands
+- [x] Connected commands using `pipe()` and `dup2()`
+- [x] Supported pipes with input/output redirection
+- [ ] Support multiple pipes
+- [ ] Improve error handling
