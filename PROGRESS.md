@@ -96,3 +96,10 @@ Implement incrementally and understand every component.
 - [x] Supported pipes with input/output redirection
 - [ ] Support multiple pipes
 - [ ] Improve error handling
+
+## Command History
+- [x] Character-by-character terminal input using termios
+- [x] Up/Down arrow history navigation
+- [x] Backspace support
+- [x] In-memory history (100 commands)
+- [ ] Persistent history across sessions

@@ -6,6 +6,8 @@
 #include <fcntl.h>
 #include <signal.h>
 #include <errno.h>
+#include <termios.h>
+#include <ctype.h>
 
 char **split_line(char *line) {
     int tokens_size = 64;
@@ -243,6 +245,159 @@ void handle_sigint(int sig) {
     write(STDOUT_FILENO, "\n", 1);
 }
 
+
+#define HISTORY_SIZE 100
+#define INPUT_SIZE 4096
+
+char *history[HISTORY_SIZE];
+int history_count = 0;
+
+void save_history(const char *command) {
+    if (command[0] == '\0') {
+        return;
+    }
+
+    if (history_count == HISTORY_SIZE) {
+        free(history[0]);
+        memmove(history, history + 1,
+                sizeof(char *) * (HISTORY_SIZE - 1));
+        history_count--;
+    }
+
+    history[history_count++] = strdup(command);
+}
+
+int read_command(const char *prompt, char **output) {
+    struct termios original, raw;
+
+    if (tcgetattr(STDIN_FILENO, &original) == -1) {
+        perror("tcgetattr");
+        return -2;
+    }
+
+    raw = original;
+    raw.c_lflag &= ~(ICANON | ECHO);
+    raw.c_cc[VMIN] = 1;
+    raw.c_cc[VTIME] = 0;
+
+    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) {
+        perror("tcsetattr");
+        return -2;
+    }
+
+    char buffer[INPUT_SIZE];
+    int length = 0;
+    int history_position = history_count;
+
+    buffer[0] = '\0';
+
+    printf("%s", prompt);
+    fflush(stdout);
+
+    while (1) {
+        char c;
+        ssize_t n = read(STDIN_FILENO, &c, 1);
+
+        if (n == -1) {
+            tcsetattr(STDIN_FILENO, TCSAFLUSH, &original);
+
+            if (errno == EINTR) {
+                return -1;
+            }
+
+            perror("read");
+            return -2;
+        }
+
+        if (n == 0) {
+            tcsetattr(STDIN_FILENO, TCSAFLUSH, &original);
+            return 0;
+        }
+
+        // Enter
+        if (c == '\n' || c == '\r') {
+            buffer[length] = '\0';
+            write(STDOUT_FILENO, "\n", 1);
+
+            tcsetattr(STDIN_FILENO, TCSAFLUSH, &original);
+
+            *output = strdup(buffer);
+            save_history(buffer);
+
+            return 1;
+        }
+
+        // Ctrl+D
+        if (c == 4 && length == 0) {
+            tcsetattr(STDIN_FILENO, TCSAFLUSH, &original);
+            return 0;
+        }
+
+        // Backspace
+        if (c == 127 || c == 8) {
+            if (length > 0) {
+                length--;
+                buffer[length] = '\0';
+                write(STDOUT_FILENO, "\b \b", 3);
+            }
+            continue;
+        }
+
+        // Arrow keys
+        if (c == '\033') {
+            char seq[2];
+
+            if (read(STDIN_FILENO, &seq[0], 1) != 1 ||
+                read(STDIN_FILENO, &seq[1], 1) != 1) {
+                continue;
+            }
+
+            if (seq[0] == '[') {
+                if (seq[1] == 'A') {
+                    // Up arrow
+                    if (history_position > 0) {
+                        history_position--;
+                        strncpy(buffer, history[history_position],
+                                INPUT_SIZE - 1);
+                        buffer[INPUT_SIZE - 1] = '\0';
+                    }
+                }
+                else if (seq[1] == 'B') {
+                    // Down arrow
+                    if (history_position < history_count) {
+                        history_position++;
+                    }
+
+                    if (history_position == history_count) {
+                        buffer[0] = '\0';
+                    }
+                    else {
+                        strncpy(buffer, history[history_position],
+                                INPUT_SIZE - 1);
+                        buffer[INPUT_SIZE - 1] = '\0';
+                    }
+                }
+
+                length = strlen(buffer);
+
+                printf("\r\033[2K%s%s", prompt, buffer);
+                fflush(stdout);
+            }
+
+            continue;
+        }
+
+        // Regular printable characters
+        if (isprint((unsigned char)c) && length < INPUT_SIZE - 1) {
+            buffer[length++] = c;
+            buffer[length] = '\0';
+
+            write(STDOUT_FILENO, &c, 1);
+        }
+    }
+}
+
+
 int main() {
     struct sigaction sa;
     sa.sa_handler = handle_sigint;
@@ -250,68 +405,70 @@ int main() {
     sa.sa_flags = 0;
 
     sigaction(SIGINT, &sa, NULL);
-    char *line = NULL;
-    size_t bufsize = 0;
 
     while (1) {
-	char cwd[1024];
-	char *home = getenv("HOME");
+        char cwd[1024];
+        char prompt[1200];
+        char *home = getenv("HOME");
 
-	if (getcwd(cwd, sizeof(cwd)) != NULL) {
+        if (getcwd(cwd, sizeof(cwd)) != NULL) {
+            if (home != NULL &&
+                strncmp(cwd, home, strlen(home)) == 0 &&
+                (cwd[strlen(home)] == '/' ||
+                 cwd[strlen(home)] == '\0')) {
 
-	    if (home != NULL &&
-    		strncmp(cwd, home, strlen(home)) == 0 &&
-		(cwd[strlen(home)] == '/' || cwd[strlen(home)] == '\0')) {
-
-		printf("sheldon:~%s> ", cwd + strlen(home));
-
-	    }
-
-	    else {
-   	        printf("sheldon:%s> ", cwd);
-	    }
-	}
-	else {
-	    printf("sheldon> ");
-	}
-
-        fflush(stdout);
-
-        if (getline(&line, &bufsize, stdin) == -1) {
-	    if (feof(stdin)) {
-		break;
+                snprintf(prompt, sizeof(prompt),
+                         "sheldon:~%s> ", cwd + strlen(home));
             }
-
-            if (errno == EINTR) {
-		clearerr(stdin);
-		continue;
+            else {
+                snprintf(prompt, sizeof(prompt),
+                         "sheldon:%s> ", cwd);
             }
+        }
+        else {
+            snprintf(prompt, sizeof(prompt), "sheldon> ");
+        }
 
-	    break;
+        char *line = NULL;
+        int result = read_command(prompt, &line);
+
+        if (result == 0) {
+            break;
+        }
+
+        if (result == -1) {
+            continue;
+        }
+
+        if (result == -2) {
+            break;
         }
 
         char **args = split_line(line);
+        free(line);
 
         if (args[0] != NULL) {
-	    if (strcmp(args[0], "exit") == 0) {
-		free(args);
-		free(line);
-		return 0;
-	    }
-            else if (strcmp(args[0], "cd") == 0) {
-	        shell_cd(args);
+            if (strcmp(args[0], "exit") == 0) {
+                free(args);
+                break;
             }
-	    else if (strcmp(args[0], "help") == 0) {
-    		shell_help();
-	    }
-	    else {
-		launch(args);
+            else if (strcmp(args[0], "cd") == 0) {
+                shell_cd(args);
+            }
+            else if (strcmp(args[0], "help") == 0) {
+                shell_help();
+            }
+            else {
+                launch(args);
             }
         }
 
         free(args);
     }
 
-    free(line);
+    for (int i = 0; i < history_count; i++) {
+        free(history[i]);
+    }
+
     return 0;
 }
