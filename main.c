@@ -119,92 +119,135 @@ void execute_command(char **args) {
 
 
 int launch(char **args) {
-    int pipe_index = -1;
+    int command_count = 1;
 
-    // Find the pipe operator
+    // Count commands and validate pipe syntax
     for (int i = 0; args[i] != NULL; i++) {
         if (strcmp(args[i], "|") == 0) {
-            if (pipe_index != -1) {
-                fprintf(stderr, "sheldon: only one pipe supported for now\n");
+            if (i == 0 || args[i + 1] == NULL ||
+                strcmp(args[i + 1], "|") == 0) {
+                fprintf(stderr, "sheldon: invalid pipe syntax\n");
                 return 1;
             }
-            pipe_index = i;
+
+            command_count++;
         }
     }
 
-    // No pipe: execute a normal command
-    if (pipe_index == -1) {
+    // Allocate command and process arrays
+    char ***commands = malloc(sizeof(char **) * command_count);
+    pid_t *pids = malloc(sizeof(pid_t) * command_count);
+
+    if (commands == NULL || pids == NULL) {
+        perror("malloc");
+        free(commands);
+        free(pids);
+        return 1;
+    }
+
+    // Split arguments into individual commands
+    int command_index = 0;
+    commands[command_index++] = args;
+
+    for (int i = 0; args[i] != NULL; i++) {
+        if (strcmp(args[i], "|") == 0) {
+            args[i] = NULL;
+            commands[command_index++] = &args[i + 1];
+        }
+    }
+
+    // Allocate N-1 pipes for N commands
+    int pipe_count = command_count - 1;
+    int (*pipes)[2] = NULL;
+
+    if (pipe_count > 0) {
+        pipes = malloc(sizeof(int[2]) * pipe_count);
+
+        if (pipes == NULL) {
+            perror("malloc");
+            free(commands);
+            free(pids);
+            return 1;
+        }
+
+        for (int i = 0; i < pipe_count; i++) {
+            if (pipe(pipes[i]) < 0) {
+                perror("pipe");
+
+                for (int j = 0; j < i; j++) {
+                    close(pipes[j][0]);
+                    close(pipes[j][1]);
+                }
+
+                free(pipes);
+                free(commands);
+                free(pids);
+                return 1;
+            }
+        }
+    }
+
+    int started = 0;
+
+    // Create one child process for every command
+    for (int i = 0; i < command_count; i++) {
         pid_t pid = fork();
 
         if (pid == 0) {
-            execute_command(args);
+            // Read from previous pipe
+            if (i > 0) {
+                if (dup2(pipes[i - 1][0], STDIN_FILENO) < 0) {
+                    perror("dup2");
+                    _exit(EXIT_FAILURE);
+                }
+            }
+
+            // Write to next pipe
+            if (i < command_count - 1) {
+                if (dup2(pipes[i][1], STDOUT_FILENO) < 0) {
+                    perror("dup2");
+                    _exit(EXIT_FAILURE);
+                }
+            }
+
+            // Close all pipe descriptors in the child
+            for (int j = 0; j < pipe_count; j++) {
+                close(pipes[j][0]);
+                close(pipes[j][1]);
+            }
+
+            execute_command(commands[i]);
         }
         else if (pid < 0) {
             perror("fork");
+            break;
         }
         else {
-            waitpid(pid, NULL, 0);
+            pids[started++] = pid;
         }
-
-        return 1;
     }
 
-    // Validate both sides of the pipe
-    if (pipe_index == 0 || args[pipe_index + 1] == NULL) {
-        fprintf(stderr, "sheldon: invalid pipe syntax\n");
-        return 1;
+    // Parent closes all pipe descriptors
+    for (int i = 0; i < pipe_count; i++) {
+        close(pipes[i][0]);
+        close(pipes[i][1]);
     }
 
-    // Separate the two commands
-    args[pipe_index] = NULL;
-    char **right_command = &args[pipe_index + 1];
+    // Wait for all successfully created children
+    for (int i = 0; i < started; i++) {
+        while (waitpid(pids[i], NULL, 0) < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
 
-    int fd[2];
-
-    if (pipe(fd) < 0) {
-        perror("pipe");
-        return 1;
+            perror("waitpid");
+            break;
+        }
     }
 
-    pid_t left_pid = fork();
-
-    if (left_pid == 0) {
-        dup2(fd[1], STDOUT_FILENO);
-        close(fd[0]);
-        close(fd[1]);
-
-        execute_command(args);
-    }
-    else if (left_pid < 0) {
-        perror("fork");
-        close(fd[0]);
-        close(fd[1]);
-        return 1;
-    }
-
-    pid_t right_pid = fork();
-
-    if (right_pid == 0) {
-        dup2(fd[0], STDIN_FILENO);
-        close(fd[0]);
-        close(fd[1]);
-
-        execute_command(right_command);
-    }
-    else if (right_pid < 0) {
-        perror("fork");
-        close(fd[0]);
-        close(fd[1]);
-        waitpid(left_pid, NULL, 0);
-        return 1;
-    }
-
-    // Parent doesn't need either end of the pipe
-    close(fd[0]);
-    close(fd[1]);
-
-    waitpid(left_pid, NULL, 0);
-    waitpid(right_pid, NULL, 0);
+    free(pipes);
+    free(commands);
+    free(pids);
 
     return 1;
 }
@@ -280,7 +323,7 @@ int read_command(const char *prompt, char **output) {
     raw.c_cc[VMIN] = 1;
     raw.c_cc[VTIME] = 0;
 
-    if (tcsetattr(STDIN_FILENO, TCSAFLUSH, &raw) == -1) {
+    if (tcsetattr(STDIN_FILENO, TCSANOW, &raw) == -1) {
         perror("tcsetattr");
         return -2;
     }
@@ -299,7 +342,7 @@ int read_command(const char *prompt, char **output) {
         ssize_t n = read(STDIN_FILENO, &c, 1);
 
         if (n == -1) {
-            tcsetattr(STDIN_FILENO, TCSAFLUSH, &original);
+            tcsetattr(STDIN_FILENO, TCSANOW, &original);
 
             if (errno == EINTR) {
                 return -1;
@@ -310,7 +353,7 @@ int read_command(const char *prompt, char **output) {
         }
 
         if (n == 0) {
-            tcsetattr(STDIN_FILENO, TCSAFLUSH, &original);
+            tcsetattr(STDIN_FILENO, TCSANOW, &original);
             return 0;
         }
 
@@ -319,7 +362,7 @@ int read_command(const char *prompt, char **output) {
             buffer[length] = '\0';
             write(STDOUT_FILENO, "\n", 1);
 
-            tcsetattr(STDIN_FILENO, TCSAFLUSH, &original);
+            tcsetattr(STDIN_FILENO, TCSANOW, &original);
 
             *output = strdup(buffer);
             save_history(buffer);
@@ -329,7 +372,7 @@ int read_command(const char *prompt, char **output) {
 
         // Ctrl+D
         if (c == 4 && length == 0) {
-            tcsetattr(STDIN_FILENO, TCSAFLUSH, &original);
+            tcsetattr(STDIN_FILENO, TCSANOW, &original);
             return 0;
         }
 

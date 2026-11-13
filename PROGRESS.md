@@ -103,3 +103,9 @@ Implement incrementally and understand every component.
 - [x] Backspace support
 - [x] In-memory history (100 commands)
 - [ ] Persistent history across sessions
+
+## Pipes
+- [x] Implemented multiple pipes between commands
+- [x] Connected processes using pipe() and dup2()
+- [x] Supported pipes with input/output redirection
+- [x] Added invalid pipe syntax detection
