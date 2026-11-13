@@ -117,3 +117,10 @@ Implement incrementally and understand every component.
 - [x] In-memory history (100 commands)
 - [x] Persistent history across sessions
 - [x] History stored in ~/.shelly_history
+
+## Error Handling
+- [x] Improved command-not-found messages
+- [x] Validated redirection syntax
+- [x] Handled file access errors
+- [x] Added error handling for fork(), pipe(), dup2(), and waitpid()
+- [x] Ensured child failures don't terminate the shell

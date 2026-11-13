@@ -63,6 +63,7 @@ char **split_line(char *line) {
 
 void execute_command(char **args) {
     signal(SIGINT, SIG_DFL);
+
     for (int i = 0; args[i] != NULL; i++) {
         int target_fd = -1;
         int flags = 0;
@@ -81,26 +82,31 @@ void execute_command(char **args) {
         }
 
         if (target_fd != -1) {
-            if (args[i + 1] == NULL) {
-                fprintf(stderr, "sheldon: expected filename after redirection\n");
-                exit(EXIT_FAILURE);
+            if (args[i + 1] == NULL ||
+                strcmp(args[i + 1], ">") == 0 ||
+                strcmp(args[i + 1], ">>") == 0 ||
+                strcmp(args[i + 1], "<") == 0) {
+                fprintf(stderr,
+                        "sheldon: missing or invalid filename after redirection\n");
+                _exit(EXIT_FAILURE);
             }
 
             int fd = open(args[i + 1], flags, 0644);
 
             if (fd < 0) {
-                perror("sheldon");
-                exit(EXIT_FAILURE);
+                perror(args[i + 1]);
+                _exit(EXIT_FAILURE);
             }
 
             if (dup2(fd, target_fd) < 0) {
-                perror("dup2");
+                perror("sheldon: dup2");
                 close(fd);
-                exit(EXIT_FAILURE);
+                _exit(EXIT_FAILURE);
             }
 
             close(fd);
 
+            // Remove the redirection operator and filename from arguments.
             int j = i;
             while (args[j + 2] != NULL) {
                 args[j] = args[j + 2];
@@ -112,16 +118,27 @@ void execute_command(char **args) {
         }
     }
 
-    execvp(args[0], args);
-    perror("sheldon");
-    exit(EXIT_FAILURE);
-}
+    if (args[0] == NULL) {
+        fprintf(stderr, "sheldon: missing command\n");
+        _exit(EXIT_FAILURE);
+    }
 
+    execvp(args[0], args);
+
+    if (errno == ENOENT) {
+        fprintf(stderr, "sheldon: %s: command not found\n", args[0]);
+    }
+    else {
+        perror(args[0]);
+    }
+
+    _exit(EXIT_FAILURE);
+}
 
 int launch(char **args) {
     int command_count = 1;
 
-    // Count commands and validate pipe syntax
+    // Validate pipe syntax and count commands.
     for (int i = 0; args[i] != NULL; i++) {
         if (strcmp(args[i], "|") == 0) {
             if (i == 0 || args[i + 1] == NULL ||
@@ -134,18 +151,17 @@ int launch(char **args) {
         }
     }
 
-    // Allocate command and process arrays
     char ***commands = malloc(sizeof(char **) * command_count);
     pid_t *pids = malloc(sizeof(pid_t) * command_count);
 
     if (commands == NULL || pids == NULL) {
-        perror("malloc");
+        perror("sheldon: malloc");
         free(commands);
         free(pids);
         return 1;
     }
 
-    // Split arguments into individual commands
+    // Split arguments into individual commands.
     int command_index = 0;
     commands[command_index++] = args;
 
@@ -156,7 +172,7 @@ int launch(char **args) {
         }
     }
 
-    // Allocate N-1 pipes for N commands
+    // Create the required pipes.
     int pipe_count = command_count - 1;
     int (*pipes)[2] = NULL;
 
@@ -164,17 +180,19 @@ int launch(char **args) {
         pipes = malloc(sizeof(int[2]) * pipe_count);
 
         if (pipes == NULL) {
-            perror("malloc");
+            perror("sheldon: malloc");
             free(commands);
             free(pids);
             return 1;
         }
 
+        int created = 0;
+
         for (int i = 0; i < pipe_count; i++) {
             if (pipe(pipes[i]) < 0) {
-                perror("pipe");
+                perror("sheldon: pipe");
 
-                for (int j = 0; j < i; j++) {
+                for (int j = 0; j < created; j++) {
                     close(pipes[j][0]);
                     close(pipes[j][1]);
                 }
@@ -184,33 +202,42 @@ int launch(char **args) {
                 free(pids);
                 return 1;
             }
+
+            created++;
         }
     }
 
     int started = 0;
+    int launch_failed = 0;
 
-    // Create one child process for every command
+    // Start one child process per command.
     for (int i = 0; i < command_count; i++) {
         pid_t pid = fork();
 
+        if (pid < 0) {
+            perror("sheldon: fork");
+            launch_failed = 1;
+            break;
+        }
+
         if (pid == 0) {
-            // Read from previous pipe
+            // Connect stdin to the previous pipe.
             if (i > 0) {
                 if (dup2(pipes[i - 1][0], STDIN_FILENO) < 0) {
-                    perror("dup2");
+                    perror("sheldon: dup2");
                     _exit(EXIT_FAILURE);
                 }
             }
 
-            // Write to next pipe
+            // Connect stdout to the next pipe.
             if (i < command_count - 1) {
                 if (dup2(pipes[i][1], STDOUT_FILENO) < 0) {
-                    perror("dup2");
+                    perror("sheldon: dup2");
                     _exit(EXIT_FAILURE);
                 }
             }
 
-            // Close all pipe descriptors in the child
+            // Close all original pipe descriptors.
             for (int j = 0; j < pipe_count; j++) {
                 close(pipes[j][0]);
                 close(pipes[j][1]);
@@ -218,29 +245,27 @@ int launch(char **args) {
 
             execute_command(commands[i]);
         }
-        else if (pid < 0) {
-            perror("fork");
-            break;
-        }
-        else {
-            pids[started++] = pid;
-        }
+
+        pids[started++] = pid;
     }
 
-    // Parent closes all pipe descriptors
+    // Parent must close its pipe descriptors so children can receive EOF.
     for (int i = 0; i < pipe_count; i++) {
         close(pipes[i][0]);
         close(pipes[i][1]);
     }
 
-    // Wait for all successfully created children
+    // Wait for every child that was successfully started.
     for (int i = 0; i < started; i++) {
-        while (waitpid(pids[i], NULL, 0) < 0) {
+        int status;
+
+        while (waitpid(pids[i], &status, 0) < 0) {
             if (errno == EINTR) {
                 continue;
             }
 
-            perror("waitpid");
+            perror("sheldon: waitpid");
+            launch_failed = 1;
             break;
         }
     }
@@ -249,7 +274,7 @@ int launch(char **args) {
     free(commands);
     free(pids);
 
-    return 1;
+    return launch_failed ? 0 : 1;
 }
 
 int shell_cd(char **args) {
