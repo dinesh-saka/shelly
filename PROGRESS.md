@@ -109,3 +109,11 @@ Implement incrementally and understand every component.
 - [x] Connected processes using pipe() and dup2()
 - [x] Supported pipes with input/output redirection
 - [x] Added invalid pipe syntax detection
+
+## Command History
+- [x] Character-by-character terminal input using termios
+- [x] Up/Down arrow history navigation
+- [x] Backspace support
+- [x] In-memory history (100 commands)
+- [x] Persistent history across sessions
+- [x] History stored in ~/.shelly_history

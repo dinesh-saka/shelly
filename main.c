@@ -441,6 +441,59 @@ int read_command(const char *prompt, char **output) {
 }
 
 
+void load_history(void) {
+    char *home = getenv("HOME");
+
+    if (home == NULL) {
+        return;
+    }
+
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/.shelly_history", home);
+
+    FILE *file = fopen(path, "r");
+
+    if (file == NULL) {
+        return;
+    }
+
+    char *line = NULL;
+    size_t size = 0;
+
+    while (getline(&line, &size, file) != -1) {
+        line[strcspn(line, "\n")] = '\0';
+        save_history(line);
+    }
+
+    free(line);
+    fclose(file);
+}
+
+void write_history(void) {
+    char *home = getenv("HOME");
+
+    if (home == NULL) {
+        return;
+    }
+
+    char path[4096];
+    snprintf(path, sizeof(path), "%s/.shelly_history", home);
+
+    FILE *file = fopen(path, "w");
+
+    if (file == NULL) {
+        perror("sheldon: history");
+        return;
+    }
+
+    for (int i = 0; i < history_count; i++) {
+        fprintf(file, "%s\n", history[i]);
+    }
+
+    fclose(file);
+}
+
+
 int main() {
     struct sigaction sa;
     sa.sa_handler = handle_sigint;
@@ -448,6 +501,7 @@ int main() {
     sa.sa_flags = 0;
 
     sigaction(SIGINT, &sa, NULL);
+    load_history();
 
     while (1) {
         char cwd[1024];
@@ -509,6 +563,7 @@ int main() {
         free(args);
     }
 
+    write_history();
     for (int i = 0; i < history_count; i++) {
         free(history[i]);
     }
