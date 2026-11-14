@@ -9,38 +9,101 @@
 #include <termios.h>
 #include <ctype.h>
 
+
+static int add_token(char ***tokens, int *count, int *capacity,
+                     const char *value, int length) {
+    if (*count >= *capacity - 1) {
+        int new_capacity = *capacity * 2;
+        char **new_tokens = realloc(*tokens,
+                                    new_capacity * sizeof(char *));
+
+        if (new_tokens == NULL) {
+            return -1;
+        }
+
+        *tokens = new_tokens;
+        *capacity = new_capacity;
+    }
+
+    char *copy = malloc(length + 1);
+
+    if (copy == NULL) {
+        return -1;
+    }
+
+    memcpy(copy, value, length);
+    copy[length] = '\0';
+
+    (*tokens)[(*count)++] = copy;
+    return 0;
+}
+
 char **split_line(char *line) {
     int tokens_size = 64;
     int token_count = 0;
+
     char **tokens = malloc(tokens_size * sizeof(char *));
+
+    if (tokens == NULL) {
+        perror("sheldon: malloc");
+        return NULL;
+    }
 
     int line_length = strlen(line);
     char *token = malloc(line_length + 1);
 
-    int token_length = 0;
-    int quote_state = 0;
-    int token_started = 0;
+    if (token == NULL) {
+        perror("sheldon: malloc");
+        free(tokens);
+        return NULL;
+    }
 
-    for (int i = 0; ; i++) {
+    int token_length = 0;
+    int token_started = 0;
+    char quote = '\0';
+
+    for (int i = 0; i <= line_length; i++) {
         char c = line[i];
 
-        if (c == '"' && quote_state == 0) {
-            quote_state = 1;
-            token_started = 1;
+        // Handle escaped characters outside single quotes.
+        if (c == '\\' && quote != '\'' && i < line_length) {
+            if (i + 1 <= line_length && line[i + 1] != '\0') {
+                token[token_length++] = line[++i];
+                token_started = 1;
+                continue;
+            }
         }
-        else if (c == '"' && quote_state == 1) {
-            quote_state = 0;
-        }
-        else if ((c == ' ' || c == '\n' || c == '\0') && quote_state == 0) {
-            if (token_started) {
-                token[token_length] = '\0';
 
-                if (token_count >= tokens_size - 1) {
-                    tokens_size *= 2;
-                    tokens = realloc(tokens, tokens_size * sizeof(char *));
+        // Handle single and double quotes.
+        if (quote == '\0' && (c == '\'' || c == '"')) {
+            quote = c;
+            token_started = 1;
+            continue;
+        }
+        else if (quote == c && quote != '\0') {
+            quote = '\0';
+            continue;
+        }
+
+        // Characters inside quotes belong to the same token.
+        if (quote != '\0') {
+            if (c == '\0') {
+                break;
+            }
+
+            token[token_length++] = c;
+            token_started = 1;
+            continue;
+        }
+
+        // End of a token at whitespace or end of input.
+        if (c == '\0' || isspace((unsigned char)c)) {
+            if (token_started) {
+                if (add_token(&tokens, &token_count, &tokens_size,
+                              token, token_length) < 0) {
+                    goto allocation_error;
                 }
 
-                tokens[token_count++] = strdup(token);
                 token_length = 0;
                 token_started = 0;
             }
@@ -48,10 +111,54 @@ char **split_line(char *line) {
             if (c == '\0') {
                 break;
             }
+
+            continue;
         }
-        else {
-            token[token_length++] = c;
-            token_started = 1;
+
+        // Recognize shell operators, even without surrounding spaces.
+        if (c == '|' || c == '&' || c == '>' ||
+            c == '<' || c == ';') {
+
+            if (token_started) {
+                if (add_token(&tokens, &token_count, &tokens_size,
+                              token, token_length) < 0) {
+                    goto allocation_error;
+                }
+
+                token_length = 0;
+                token_started = 0;
+            }
+
+            int operator_length = 1;
+
+            if ((c == '>' && line[i + 1] == '>') ||
+                (c == '&' && line[i + 1] == '&') ||
+                (c == '|' && line[i + 1] == '|')) {
+                operator_length = 2;
+            }
+
+            if (add_token(&tokens, &token_count, &tokens_size,
+                          &line[i], operator_length) < 0) {
+                goto allocation_error;
+            }
+
+            if (operator_length == 2) {
+                i++;
+            }
+
+            continue;
+        }
+
+        // Regular character.
+        token[token_length++] = c;
+        token_started = 1;
+    }
+
+    // Add any remaining token.
+    if (token_started) {
+        if (add_token(&tokens, &token_count, &tokens_size,
+                      token, token_length) < 0) {
+            goto allocation_error;
         }
     }
 
@@ -59,6 +166,17 @@ char **split_line(char *line) {
     tokens[token_count] = NULL;
 
     return tokens;
+
+allocation_error:
+    perror("sheldon: token allocation");
+
+    for (int i = 0; i < token_count; i++) {
+        free(tokens[i]);
+    }
+
+    free(tokens);
+    free(token);
+    return NULL;
 }
 
 void execute_command(char **args) {
@@ -568,6 +686,10 @@ int main() {
 
         char **args = split_line(line);
         free(line);
+
+	if (args == NULL) {
+	    continue;
+	}
 
         if (args[0] != NULL) {
             if (strcmp(args[0], "exit") == 0) {

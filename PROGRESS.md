@@ -124,3 +124,9 @@ Implement incrementally and understand every component.
 - [x] Handled file access errors
 - [x] Added error handling for fork(), pipe(), dup2(), and waitpid()
 - [x] Ensured child failures don't terminate the shell
+
+## Improved Tokenizer
+- [x] Single and double quote support
+- [x] Escaped characters
+- [x] Operators recognized without spaces
+- [x] Support for adjacent quoted and unquoted text
