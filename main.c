@@ -8,6 +8,7 @@
 #include <errno.h>
 #include <termios.h>
 #include <ctype.h>
+#include <time.h>
 
 #define HISTORY_SIZE 100
 #define INPUT_SIZE 4096
@@ -119,15 +120,32 @@ char **split_line(char *line) {
     for (int i = 0; i <= line_length; i++) {
         char c = line[i];
 
-        // Handle escaped characters outside single quotes.
-        if (c == '\\' && quote != '\'' && i < line_length) {
-            token_started = 1;
+        /*
+         * Outside single quotes, backslash escapes the next character.
+         * Inside double quotes, it only escapes ", \ and $.
+         * For other characters (such as the n in \n), preserve it.
+         */
+        if (c == '\\' && i < line_length && quote != '\'') {
+            char next = line[i + 1];
+
+            if (quote == '"' &&
+                next != '"' && next != '\\' && next != '$') {
+                if (append_char(&token, &token_length,
+                                &token_capacity, '\\') < 0) {
+                    goto allocation_error;
+                }
+
+                token_started = 1;
+                continue;
+            }
 
             if (append_char(&token, &token_length,
-                            &token_capacity, line[++i]) < 0) {
+                            &token_capacity, next) < 0) {
                 goto allocation_error;
             }
 
+            token_started = 1;
+            i++;
             continue;
         }
 
@@ -142,6 +160,13 @@ char **split_line(char *line) {
         if (quote == c && quote != '\0') {
             quote = '\0';
             continue;
+        }
+
+        // An open quote at end-of-input is a syntax error.
+        if (quote != '\0' && c == '\0') {
+            fprintf(stderr, "sheldon: unmatched %s quote\n",
+                    quote == '\'' ? "single" : "double");
+            goto syntax_error;
         }
 
         // Expand environment variables unless inside single quotes.
@@ -210,17 +235,12 @@ char **split_line(char *line) {
             }
 
             token_started = 1;
-
             i = braced ? end : end - 1;
             continue;
         }
 
         // Characters inside quotes belong to the same token.
         if (quote != '\0') {
-            if (c == '\0') {
-                break;
-            }
-
             if (append_char(&token, &token_length,
                             &token_capacity, c) < 0) {
                 goto allocation_error;
@@ -303,6 +323,15 @@ char **split_line(char *line) {
 
     return tokens;
 
+syntax_error:
+    for (int i = 0; i < token_count; i++) {
+        free(tokens[i]);
+    }
+
+    free(tokens);
+    free(token);
+    return NULL;
+
 allocation_error:
     perror("sheldon: token allocation");
 
@@ -315,7 +344,6 @@ allocation_error:
 
     return NULL;
 }
-
 void execute_command(char **args) {
     signal(SIGINT, SIG_DFL);
 
@@ -688,7 +716,7 @@ int launch(char **args, int background) {
         close(pipes[i][1]);
     }
 
-    
+
     // Background jobs return immediately without waiting.
     if (background && started == command_count && !launch_failed) {
         if (register_job(pids, started, command_text)) {
@@ -921,6 +949,21 @@ void save_history(const char *command) {
     history[history_count++] = strdup(command);
 }
 
+static void redraw_input(const char *prompt, const char *buffer,
+                         int length, int cursor) {
+    printf("\r\033[2K%s", prompt);
+
+    if (length > 0) {
+        fwrite(buffer, 1, (size_t)length, stdout);
+    }
+
+    if (cursor < length) {
+        printf("\033[%dD", length - cursor);
+    }
+
+    fflush(stdout);
+}
+
 int read_command(const char *prompt, char **output) {
     struct termios original, raw;
 
@@ -939,11 +982,12 @@ int read_command(const char *prompt, char **output) {
         return -2;
     }
 
-    char buffer[INPUT_SIZE];
+    char buffer[INPUT_SIZE] = {0};
+    char saved_line[INPUT_SIZE] = {0};
     int length = 0;
+    int cursor = 0;
     int history_position = history_count;
-
-    buffer[0] = '\0';
+    int saved_line_valid = 0;
 
     printf("%s", prompt);
     fflush(stdout);
@@ -972,85 +1016,149 @@ int read_command(const char *prompt, char **output) {
         if (c == '\n' || c == '\r') {
             buffer[length] = '\0';
             write(STDOUT_FILENO, "\n", 1);
-
             tcsetattr(STDIN_FILENO, TCSANOW, &original);
 
             *output = strdup(buffer);
-            save_history(buffer);
+            if (*output == NULL) {
+                perror("sheldon: strdup");
+                return -2;
+            }
 
+            save_history(buffer);
             return 1;
         }
 
-        // Ctrl+D
+        // Ctrl+D: exit only when the input line is empty.
         if (c == 4 && length == 0) {
             tcsetattr(STDIN_FILENO, TCSANOW, &original);
             return 0;
         }
 
-        // Backspace
+        // Ctrl+A / Ctrl+E: move to beginning / end.
+        if (c == 1) {
+            cursor = 0;
+            redraw_input(prompt, buffer, length, cursor);
+            continue;
+        }
+        if (c == 5) {
+            cursor = length;
+            redraw_input(prompt, buffer, length, cursor);
+            continue;
+        }
+
+        // Backspace removes the character immediately before the cursor.
         if (c == 127 || c == 8) {
-            if (length > 0) {
+            if (cursor > 0) {
+                memmove(&buffer[cursor - 1], &buffer[cursor],
+                        (size_t)(length - cursor + 1));
+                cursor--;
                 length--;
-                buffer[length] = '\0';
-                write(STDOUT_FILENO, "\b \b", 3);
+                redraw_input(prompt, buffer, length, cursor);
             }
             continue;
         }
 
-        // Arrow keys
+        // Escape sequences: arrows, Home, End and Delete.
         if (c == '\033') {
-            char seq[2];
+            char seq[8];
+            size_t seq_length = 0;
 
-            if (read(STDIN_FILENO, &seq[0], 1) != 1 ||
-                read(STDIN_FILENO, &seq[1], 1) != 1) {
+            if (read(STDIN_FILENO, &seq[seq_length], 1) != 1) {
                 continue;
             }
+            seq_length++;
 
             if (seq[0] == '[') {
-                if (seq[1] == 'A') {
-                    // Up arrow
-                    if (history_position > 0) {
-                        history_position--;
-                        strncpy(buffer, history[history_position],
-                                INPUT_SIZE - 1);
-                        buffer[INPUT_SIZE - 1] = '\0';
+                while (seq_length < sizeof(seq) &&
+                       read(STDIN_FILENO, &seq[seq_length], 1) == 1) {
+                    char last = seq[seq_length++];
+                    if ((last >= 'A' && last <= 'Z') || last == '~') {
+                        break;
                     }
                 }
-                else if (seq[1] == 'B') {
-                    // Down arrow
+
+                char key = seq[seq_length - 1];
+
+                if (key == 'A') {
+                    // Up: save the user's current draft before browsing history.
+                    if (history_position == history_count && !saved_line_valid) {
+                        memcpy(saved_line, buffer, (size_t)length + 1);
+                        saved_line_valid = 1;
+                    }
+
+                    if (history_position > 0) {
+                        history_position--;
+                        snprintf(buffer, sizeof(buffer), "%s",
+                                 history[history_position]);
+                        length = (int)strlen(buffer);
+                        cursor = length;
+                    }
+                }
+                else if (key == 'B') {
+                    // Down: restore the draft after the newest history entry.
                     if (history_position < history_count) {
                         history_position++;
                     }
 
                     if (history_position == history_count) {
-                        buffer[0] = '\0';
+                        if (saved_line_valid) {
+                            memcpy(buffer, saved_line, sizeof(buffer));
+                        }
+                        else {
+                            buffer[0] = '\0';
+                        }
                     }
                     else {
-                        strncpy(buffer, history[history_position],
-                                INPUT_SIZE - 1);
-                        buffer[INPUT_SIZE - 1] = '\0';
+                        snprintf(buffer, sizeof(buffer), "%s",
+                                 history[history_position]);
+                    }
+
+                    length = (int)strlen(buffer);
+                    cursor = length;
+                    if (history_position == history_count) {
+                        saved_line_valid = 0;
+                    }
+                }
+                else if (key == 'C' && cursor < length) {
+                    cursor++;
+                }
+                else if (key == 'D' && cursor > 0) {
+                    cursor--;
+                }
+                else if (key == 'H' ||
+                         (seq_length >= 2 && seq[1] == '1' && key == '~')) {
+                    cursor = 0;
+                }
+                else if (key == 'F' ||
+                         (seq_length >= 2 && seq[1] == '4' && key == '~')) {
+                    cursor = length;
+                }
+                else if (key == '~' && seq_length >= 2 && seq[1] == '3') {
+                    // Delete removes the character under the cursor.
+                    if (cursor < length) {
+                        memmove(&buffer[cursor], &buffer[cursor + 1],
+                                (size_t)(length - cursor));
+                        length--;
                     }
                 }
 
-                length = strlen(buffer);
-
-                printf("\r\033[2K%s%s", prompt, buffer);
-                fflush(stdout);
+                redraw_input(prompt, buffer, length, cursor);
             }
 
             continue;
         }
 
-        // Regular printable characters
+        // Insert printable characters at the current cursor position.
         if (isprint((unsigned char)c) && length < INPUT_SIZE - 1) {
-            buffer[length++] = c;
-            buffer[length] = '\0';
-
-            write(STDOUT_FILENO, &c, 1);
+            memmove(&buffer[cursor + 1], &buffer[cursor],
+                    (size_t)(length - cursor + 1));
+            buffer[cursor] = c;
+            cursor++;
+            length++;
+            redraw_input(prompt, buffer, length, cursor);
         }
     }
 }
-
 
 void load_history(void) {
     char *home = getenv("HOME");
@@ -1104,6 +1212,114 @@ void write_history(void) {
     fclose(file);
 }
 
+
+void cleanup_background_jobs(void) {
+    // Ask all remaining background processes to terminate gracefully.
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (!jobs[i].active) {
+            continue;
+        }
+
+        for (int j = 0; j < jobs[i].process_count; j++) {
+            if (jobs[i].pids[j] > 0 &&
+                kill(jobs[i].pids[j], SIGTERM) < 0 &&
+                errno != ESRCH) {
+                perror("sheldon: kill");
+            }
+        }
+    }
+
+    // Give them up to one second to exit and reap them as they finish.
+    for (int attempt = 0; attempt < 10; attempt++) {
+        int remaining = 0;
+
+        for (int i = 0; i < MAX_JOBS; i++) {
+            if (!jobs[i].active) {
+                continue;
+            }
+
+            for (int j = 0; j < jobs[i].process_count; j++) {
+                pid_t pid = jobs[i].pids[j];
+
+                if (pid <= 0) {
+                    continue;
+                }
+
+                int status;
+                pid_t result = waitpid(pid, &status, WNOHANG);
+
+                if (result == pid ||
+                    (result < 0 && errno == ECHILD)) {
+                    jobs[i].pids[j] = 0;
+                }
+                else if (result == 0 ||
+                         (result < 0 && errno == EINTR)) {
+                    remaining++;
+                }
+                else if (result < 0) {
+                    perror("sheldon: waitpid");
+                    jobs[i].pids[j] = 0;
+                }
+            }
+        }
+
+        if (remaining == 0) {
+            break;
+        }
+
+        struct timespec delay = {0, 100000000L};
+        nanosleep(&delay, NULL);
+    }
+
+    // Force-stop any process that ignored SIGTERM, then reap it.
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (!jobs[i].active) {
+            continue;
+        }
+
+        for (int j = 0; j < jobs[i].process_count; j++) {
+            pid_t pid = jobs[i].pids[j];
+
+            if (pid <= 0) {
+                continue;
+            }
+
+            if (kill(pid, SIGKILL) < 0 && errno != ESRCH) {
+                perror("sheldon: kill");
+            }
+
+            int status;
+            pid_t result;
+
+            do {
+                result = waitpid(pid, &status, 0);
+            } while (result < 0 && errno == EINTR);
+
+            if (result < 0 && errno != ECHILD) {
+                perror("sheldon: waitpid");
+            }
+
+            jobs[i].pids[j] = 0;
+        }
+
+        free(jobs[i].pids);
+        free(jobs[i].command);
+
+        jobs[i].pids = NULL;
+        jobs[i].command = NULL;
+        jobs[i].active = 0;
+    }
+
+    job_count = 0;
+}
+
+void free_tokens(char **tokens, size_t count) {
+    for (size_t i = 0; i < count; i++) {
+        free(tokens[i]);
+    }
+
+    free(tokens);
+}
 
 int main() {
     struct sigaction sa;
@@ -1161,10 +1377,40 @@ int main() {
             continue;
         }
 
+        // Count tokens before command execution modifies the array.
+        size_t token_count = 0;
+
+        while (args[token_count] != NULL) {
+            token_count++;
+        }
+
+        // Preserve the original token pointers.
+        char **original_tokens = NULL;
+
+        if (token_count > 0) {
+            original_tokens = malloc(token_count * sizeof(char *));
+
+            if (original_tokens == NULL) {
+                perror("sheldon: malloc");
+                free_tokens(args, token_count);
+                continue;
+            }
+
+            memcpy(original_tokens, args,
+                token_count * sizeof(char *));
+        }
+
         if (args[0] != NULL) {
             execute_chain(args);
         }
 
+        // Free every original token, including operators
+        // that execution replaced with NULL.
+        for (size_t i = 0; i < token_count; i++) {
+            free(original_tokens[i]);
+        }
+
+        free(original_tokens);
         free(args);
 
         if (shell_exit_requested) {
@@ -1173,6 +1419,7 @@ int main() {
 
     }
 
+    cleanup_background_jobs();
     write_history();
     for (int i = 0; i < history_count; i++) {
         free(history[i]);

@@ -1,154 +1,107 @@
-# Shelly - Development Progress
+# Shelly --- Development Progress
 
-## Project
-A Unix-like command-line shell written in C.
+## Overview
 
-## Environment
-- Windows 11 + WSL2
-- Ubuntu 24.04
-- GCC 13.3
-- Development language: C
+Shelly is a Unix-like command-line shell written in C. The project
+focuses on understanding how shells interact with the operating system
+through process creation, execution, file descriptors, signals, and
+terminal input.
 
-## Completed
-- Basic REPL using getline()
-- Dynamic memory management
-- Tokenization using strtok()
-- Process creation using fork()
-- Command execution using execvp()
-- Parent process waiting using waitpid()
-- cd built-in using chdir()
+## Implemented Features
 
-## Concepts learned
-- Pointers and pointer-to-pointer
-- malloc, realloc, free
-- String manipulation
-- Processes and system calls
+### 1. Shell Fundamentals
 
-## Current state
-External commands work.
-cd works, including changing directories.
-exit is not implemented yet.
+-   [x] Interactive read-evaluate-print loop (REPL)
+-   [x] Dynamic prompt displaying the current working directory
+-   [x] External command execution using `fork()` and `execvp()`
+-   [x] Process waiting using `waitpid()`
+-   [x] Built-in commands: `cd`, `help`, and `exit`
 
-## Next tasks
-1. Implement exit
-2. Make cd without arguments go to HOME
-3. Implement help
-4. Improve command parsing and support quotes
-5. Implement redirection and pipes
+### 2. Command Parsing
 
-## Learning approach
-Follow Brennan's Write a Shell in C tutorial.
-Implement incrementally and understand every component.
+-   [x] Tokenization of command input
+-   [x] Single-quoted and double-quoted arguments
+-   [x] Escaped characters
+-   [x] Adjacent quoted and unquoted segments
+-   [x] Environment variable expansion
+-   [x] Unmatched quote detection
 
-## Completed: Quote-aware tokenization
+### 3. Redirection and Pipelines
 
-- Replaced `strtok()` with a custom tokenizer.
-- Added basic double-quote support.
-- Spaces inside double quotes are preserved.
-- Supports normal arguments and multiple quoted/unquoted arguments.
-- Tested commands:
-  - `echo hello world`
-  - `echo "hello world"`
-  - `echo "hello" world`
-  - `echo "hello        world"`
+-   [x] Output redirection (`>`)
+-   [x] Append redirection (`>>`)
+-   [x] Input redirection (`<`)
+-   [x] Command pipelines (`|`)
+-   [x] Multiple commands in a pipeline
 
-### Known limitations
-- Single quotes not supported.
-- Escape characters not supported.
-- Unclosed quotes are not handled.
-- Tabs are not treated as separators.
+### 4. Command Execution
 
-## Next milestone
-- Input/output redirection.
-- Learn file descriptors, `open()`, `dup2()`, and `close()`.
+-   [x] Sequential command execution (`;`)
+-   [x] Conditional AND (`&&`)
+-   [x] Conditional OR (`||`)
+-   [x] Background execution (`&`)
 
-## Completed: I/O Redirection
+### 5. Process and Job Management
 
-- Implemented output redirection (`>`).
-- Implemented append redirection (`>>`).
-- Implemented input redirection (`<`).
-- Used `open()` to open and create files.
-- Used `dup2()` to redirect standard input/output.
-- Used `close()` to release file descriptors.
-- Implemented redirection in the child process.
+-   [x] Background job tracking
+-   [x] Job listing (`jobs`)
+-   [x] Waiting for background jobs (`wait`)
+-   [x] Background process reaping using `WNOHANG`
+-   [x] Background process cleanup when exiting the shell
 
-### Tested commands
+### 6. Terminal Interaction
 
-- `echo hello > output.txt`
-- `echo world >> output.txt`
-- `cat output.txt`
-- `wc -w < output.txt`
+-   [x] Ctrl+C signal handling
+-   [x] Ctrl+D exit handling
+-   [x] Interactive command history
+-   [x] Persistent history in `~/.shelly_history`
+-   [x] Up/Down history navigation
+-   [x] Left/Right cursor movement
+-   [x] Backspace and Delete
+-   [x] Home and End
+-   [x] Ctrl+A and Ctrl+E
 
-### Known limitations
+### 7. Reliability
 
-- Redirection operators require spaces around them.
-- Full shell parsing and advanced redirection are not supported yet.
+-   [x] Error handling for missing commands
+-   [x] Error handling for pipe and redirection failures
+-   [x] Memory cleanup for command parsing
+-   [x] Handling of malformed quoted input
 
-## Next milestone
+## Testing
 
-- Pipes (`|`).
-- Signal handling (`Ctrl+C`, `Ctrl+Z`).
-- Command history.
+The following scenarios have been manually tested:
 
-## Pipes
-- [x] Implemented single pipe (`|`) between two commands
-- [x] Connected commands using `pipe()` and `dup2()`
-- [x] Supported pipes with input/output redirection
-- [ ] Support multiple pipes
-- [ ] Improve error handling
+-   Basic external commands
+-   Quoted arguments and escaped characters
+-   Environment variable expansion
+-   Input and output redirection
+-   Append redirection
+-   Pipelines
+-   Sequential and conditional command execution
+-   Background process execution
+-   Job listing and waiting
+-   Unmatched quotes
+-   Shell survival after Ctrl+C
+-   Background process cleanup on exit
+-   Interactive command history and line editing
 
-## Command History
-- [x] Character-by-character terminal input using termios
-- [x] Up/Down arrow history navigation
-- [x] Backspace support
-- [x] In-memory history (100 commands)
-- [ ] Persistent history across sessions
+## Version 1.0
 
-## Pipes
-- [x] Implemented multiple pipes between commands
-- [x] Connected processes using pipe() and dup2()
-- [x] Supported pipes with input/output redirection
-- [x] Added invalid pipe syntax detection
+The initial release focuses on a functional interactive shell with
+command execution, parsing, redirection, pipelines, background jobs,
+persistent history, and basic terminal line editing.
 
-## Command History
-- [x] Character-by-character terminal input using termios
-- [x] Up/Down arrow history navigation
-- [x] Backspace support
-- [x] In-memory history (100 commands)
-- [x] Persistent history across sessions
-- [x] History stored in ~/.shelly_history
+## Future Ideas
 
-## Error Handling
-- [x] Improved command-not-found messages
-- [x] Validated redirection syntax
-- [x] Handled file access errors
-- [x] Added error handling for fork(), pipe(), dup2(), and waitpid()
-- [x] Ensured child failures don't terminate the shell
+Potential improvements for a future version:
 
-## Improved Tokenizer
-- [x] Single and double quote support
-- [x] Escaped characters
-- [x] Operators recognized without spaces
-- [x] Support for adjacent quoted and unquoted text
+-   Command and path autocomplete
+-   Inline command suggestions
+-   Improved history search
+-   Directory bookmarks
+-   Git-aware prompt
+-   Interactive process dashboard
+-   Split panes and multiple terminal sessions
 
-## Environment Variables
-- [x] Expand $VARIABLE syntax
-- [x] Expand ${VARIABLE} syntax
-- [x] Expand variables inside double quotes
-- [x] Preserve variables inside single quotes
-- [x] Support escaped dollar signs
-- [x] Handle undefined variables
-
-## Command Chaining
-- [x] Sequential command execution with ;
-- [x] Conditional execution with &&
-- [x] Conditional execution with ||
-- [x] Command exit status propagation
-
-## Background Processes and Job Management
-- [x] Background execution using &
-- [x] Multiple background jobs
-- [x] jobs built-in
-- [x] wait built-in
-- [x] Background pipeline execution
-- [x] Automatic cleanup of completed jobs
+These features are intentionally outside the initial v1.0 scope.
