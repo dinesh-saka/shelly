@@ -130,3 +130,11 @@ Implement incrementally and understand every component.
 - [x] Escaped characters
 - [x] Operators recognized without spaces
 - [x] Support for adjacent quoted and unquoted text
+
+## Environment Variables
+- [x] Expand $VARIABLE syntax
+- [x] Expand ${VARIABLE} syntax
+- [x] Expand variables inside double quotes
+- [x] Preserve variables inside single quotes
+- [x] Support escaped dollar signs
+- [x] Handle undefined variables

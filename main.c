@@ -38,6 +38,38 @@ static int add_token(char ***tokens, int *count, int *capacity,
     return 0;
 }
 
+static int append_char(char **buffer, int *length, int *capacity, char c) {
+    if (*length + 1 >= *capacity) {
+        int new_capacity = *capacity * 2;
+        char *new_buffer = realloc(*buffer, new_capacity);
+
+        if (new_buffer == NULL) {
+            return -1;
+        }
+
+        *buffer = new_buffer;
+        *capacity = new_capacity;
+    }
+
+    (*buffer)[(*length)++] = c;
+    return 0;
+}
+
+static int append_string(char **buffer, int *length, int *capacity,
+                         const char *value) {
+    if (value == NULL) {
+        return 0;
+    }
+
+    while (*value != '\0') {
+        if (append_char(buffer, length, capacity, *value++) < 0) {
+            return -1;
+        }
+    }
+
+    return 0;
+}
+
 char **split_line(char *line) {
     int tokens_size = 64;
     int token_count = 0;
@@ -50,7 +82,10 @@ char **split_line(char *line) {
     }
 
     int line_length = strlen(line);
-    char *token = malloc(line_length + 1);
+    int token_capacity = line_length + 1;
+    int token_length = 0;
+
+    char *token = malloc(token_capacity);
 
     if (token == NULL) {
         perror("sheldon: malloc");
@@ -58,7 +93,6 @@ char **split_line(char *line) {
         return NULL;
     }
 
-    int token_length = 0;
     int token_started = 0;
     char quote = '\0';
 
@@ -67,21 +101,97 @@ char **split_line(char *line) {
 
         // Handle escaped characters outside single quotes.
         if (c == '\\' && quote != '\'' && i < line_length) {
-            if (i + 1 <= line_length && line[i + 1] != '\0') {
-                token[token_length++] = line[++i];
-                token_started = 1;
-                continue;
+            token_started = 1;
+
+            if (append_char(&token, &token_length,
+                            &token_capacity, line[++i]) < 0) {
+                goto allocation_error;
             }
+
+            continue;
         }
 
-        // Handle single and double quotes.
+        // Start single or double quotes.
         if (quote == '\0' && (c == '\'' || c == '"')) {
             quote = c;
             token_started = 1;
             continue;
         }
-        else if (quote == c && quote != '\0') {
+
+        // End the current quote.
+        if (quote == c && quote != '\0') {
             quote = '\0';
+            continue;
+        }
+
+        // Expand environment variables unless inside single quotes.
+        if (c == '$' && quote != '\'') {
+            int start;
+            int end;
+            int braced = 0;
+
+            if (line[i + 1] == '{') {
+                braced = 1;
+                start = i + 2;
+                end = start;
+
+                while (line[end] != '\0' && line[end] != '}') {
+                    end++;
+                }
+
+                if (line[end] != '}') {
+                    token_started = 1;
+
+                    if (append_char(&token, &token_length,
+                                    &token_capacity, '$') < 0) {
+                        goto allocation_error;
+                    }
+
+                    continue;
+                }
+            }
+            else if (isalpha((unsigned char)line[i + 1]) ||
+                     line[i + 1] == '_') {
+                start = i + 1;
+                end = start;
+
+                while (isalnum((unsigned char)line[end]) ||
+                       line[end] == '_') {
+                    end++;
+                }
+            }
+            else {
+                token_started = 1;
+
+                if (append_char(&token, &token_length,
+                                &token_capacity, '$') < 0) {
+                    goto allocation_error;
+                }
+
+                continue;
+            }
+
+            int name_length = end - start;
+            char *name = malloc(name_length + 1);
+
+            if (name == NULL) {
+                goto allocation_error;
+            }
+
+            memcpy(name, line + start, name_length);
+            name[name_length] = '\0';
+
+            const char *value = getenv(name);
+            free(name);
+
+            if (append_string(&token, &token_length,
+                              &token_capacity, value) < 0) {
+                goto allocation_error;
+            }
+
+            token_started = 1;
+
+            i = braced ? end : end - 1;
             continue;
         }
 
@@ -91,12 +201,16 @@ char **split_line(char *line) {
                 break;
             }
 
-            token[token_length++] = c;
+            if (append_char(&token, &token_length,
+                            &token_capacity, c) < 0) {
+                goto allocation_error;
+            }
+
             token_started = 1;
             continue;
         }
 
-        // End of a token at whitespace or end of input.
+        // Finish a token at whitespace or end of input.
         if (c == '\0' || isspace((unsigned char)c)) {
             if (token_started) {
                 if (add_token(&tokens, &token_count, &tokens_size,
@@ -115,7 +229,7 @@ char **split_line(char *line) {
             continue;
         }
 
-        // Recognize shell operators, even without surrounding spaces.
+        // Recognize operators without requiring spaces.
         if (c == '|' || c == '&' || c == '>' ||
             c == '<' || c == ';') {
 
@@ -149,12 +263,14 @@ char **split_line(char *line) {
             continue;
         }
 
-        // Regular character.
-        token[token_length++] = c;
+        if (append_char(&token, &token_length,
+                        &token_capacity, c) < 0) {
+            goto allocation_error;
+        }
+
         token_started = 1;
     }
 
-    // Add any remaining token.
     if (token_started) {
         if (add_token(&tokens, &token_count, &tokens_size,
                       token, token_length) < 0) {
@@ -176,6 +292,7 @@ allocation_error:
 
     free(tokens);
     free(token);
+
     return NULL;
 }
 
