@@ -9,6 +9,13 @@
 #include <termios.h>
 #include <ctype.h>
 
+#define HISTORY_SIZE 100
+#define INPUT_SIZE 4096
+
+char *history[HISTORY_SIZE];
+int history_count = 0;
+
+int shell_exit_requested = 0;
 
 static int add_token(char ***tokens, int *count, int *capacity,
                      const char *value, int length) {
@@ -490,18 +497,24 @@ int launch(char **args) {
         close(pipes[i][1]);
     }
 
-    // Wait for every child that was successfully started.
+    // Wait for every child and capture the last command's status.
+    int last_status = 1;
+
     for (int i = 0; i < started; i++) {
         int status;
+        pid_t result;
 
-        while (waitpid(pids[i], &status, 0) < 0) {
-            if (errno == EINTR) {
-                continue;
-            }
+        do {
+            result = waitpid(pids[i], &status, 0);
+        } while (result < 0 && errno == EINTR);
 
+        if (result < 0) {
             perror("sheldon: waitpid");
             launch_failed = 1;
-            break;
+        }
+        else if (i == started - 1) {
+            last_status = WIFEXITED(status) &&
+                        WEXITSTATUS(status) == 0;
         }
     }
 
@@ -509,7 +522,9 @@ int launch(char **args) {
     free(commands);
     free(pids);
 
-    return launch_failed ? 0 : 1;
+    return (!launch_failed &&
+        started == command_count &&
+        last_status) ? 1 : 0;
 }
 
 int shell_cd(char **args) {
@@ -519,18 +534,20 @@ int shell_cd(char **args) {
         directory = getenv("HOME");
     }
     else {
-	directory = args[1];
+        directory = args[1];
     }
 
     if (directory == NULL) {
         fprintf(stderr, "sheldon: HOME not set\n");
+        return 0;
     }
-    else if (chdir(directory) != 0) {
+
+    if (chdir(directory) != 0) {
         perror("sheldon");
+        return 0;
     }
 
     return 1;
-
 }
 
 int shell_help(void) {
@@ -543,17 +560,112 @@ int shell_help(void) {
     return 1;
 }
 
+int is_chain_operator(const char *token) {
+    return strcmp(token, ";") == 0 ||
+           strcmp(token, "&&") == 0 ||
+           strcmp(token, "||") == 0;
+}
+
+int execute_segment(char **args) {
+    if (args[0] == NULL) {
+        return 1;
+    }
+
+    if (strcmp(args[0], "exit") == 0) {
+        shell_exit_requested = 1;
+        return 1;
+    }
+    else if (strcmp(args[0], "cd") == 0) {
+        return shell_cd(args);
+    }
+    else if (strcmp(args[0], "help") == 0) {
+        return shell_help();
+    }
+
+    return launch(args);
+}
+
+int execute_chain(char **args) {
+    int segment_count = 1;
+
+    // Count operators and validate the chain.
+    for (int i = 0; args[i] != NULL; i++) {
+        if (is_chain_operator(args[i])) {
+            if (i == 0 || args[i + 1] == NULL ||
+                is_chain_operator(args[i + 1])) {
+                fprintf(stderr,
+                        "sheldon: invalid command chain syntax\n");
+                return 0;
+            }
+
+            segment_count++;
+        }
+    }
+
+    char ***segments = malloc(sizeof(char **) * segment_count);
+    char **operators = NULL;
+
+    if (segment_count > 1) {
+        operators = malloc(sizeof(char *) * (segment_count - 1));
+    }
+
+    if (segments == NULL ||
+        (segment_count > 1 && operators == NULL)) {
+        perror("sheldon: malloc");
+        free(segments);
+        free(operators);
+        return 0;
+    }
+
+    // Divide the input into individual command segments.
+    int segment_index = 0;
+    segments[segment_index++] = args;
+
+    for (int i = 0; args[i] != NULL; i++) {
+        if (is_chain_operator(args[i])) {
+            operators[segment_index - 1] = args[i];
+            args[i] = NULL;
+            segments[segment_index++] = &args[i + 1];
+        }
+    }
+
+    // Execute segments according to their operators.
+    int status = 1;
+
+    for (int i = 0; i < segment_count; i++) {
+        int should_execute = 1;
+
+        if (i > 0) {
+            char *op = operators[i - 1];
+
+            if (strcmp(op, "&&") == 0) {
+                should_execute = (status == 1);
+            }
+            else if (strcmp(op, "||") == 0) {
+                should_execute = (status == 0);
+            }
+            // Semicolon always executes the next command.
+        }
+
+        if (should_execute && segments[i][0] != NULL) {
+            status = execute_segment(segments[i]);
+        }
+
+        if (shell_exit_requested) {
+            break;
+        }
+    }
+
+    free(segments);
+    free(operators);
+
+    return status;
+}
+
 void handle_sigint(int sig) {
     (void)sig;
     write(STDOUT_FILENO, "\n", 1);
 }
-
-
-#define HISTORY_SIZE 100
-#define INPUT_SIZE 4096
-
-char *history[HISTORY_SIZE];
-int history_count = 0;
 
 void save_history(const char *command) {
     if (command[0] == '\0') {
@@ -804,27 +916,20 @@ int main() {
         char **args = split_line(line);
         free(line);
 
-	if (args == NULL) {
-	    continue;
-	}
+        if (args == NULL) {
+            continue;
+        }
 
         if (args[0] != NULL) {
-            if (strcmp(args[0], "exit") == 0) {
-                free(args);
-                break;
-            }
-            else if (strcmp(args[0], "cd") == 0) {
-                shell_cd(args);
-            }
-            else if (strcmp(args[0], "help") == 0) {
-                shell_help();
-            }
-            else {
-                launch(args);
-            }
+            execute_chain(args);
         }
 
         free(args);
+
+        if (shell_exit_requested) {
+            break;
+        }
+
     }
 
     write_history();

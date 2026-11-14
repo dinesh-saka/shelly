@@ -138,3 +138,9 @@ Implement incrementally and understand every component.
 - [x] Preserve variables inside single quotes
 - [x] Support escaped dollar signs
 - [x] Handle undefined variables
+
+## Command Chaining
+- [x] Sequential command execution with ;
+- [x] Conditional execution with &&
+- [x] Conditional execution with ||
+- [x] Command exit status propagation
