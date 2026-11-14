@@ -144,3 +144,11 @@ Implement incrementally and understand every component.
 - [x] Conditional execution with &&
 - [x] Conditional execution with ||
 - [x] Command exit status propagation
+
+## Background Processes and Job Management
+- [x] Background execution using &
+- [x] Multiple background jobs
+- [x] jobs built-in
+- [x] wait built-in
+- [x] Background pipeline execution
+- [x] Automatic cleanup of completed jobs

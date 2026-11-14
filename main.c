@@ -11,6 +11,19 @@
 
 #define HISTORY_SIZE 100
 #define INPUT_SIZE 4096
+#define MAX_JOBS 100
+
+typedef struct {
+    int id;
+    pid_t *pids;
+    int process_count;
+    char *command;
+    int active;
+} Job;
+
+Job jobs[MAX_JOBS] = {0};
+int job_count = 0;
+int next_job_id = 1;
 
 char *history[HISTORY_SIZE];
 int history_count = 0;
@@ -377,7 +390,161 @@ void execute_command(char **args) {
     _exit(EXIT_FAILURE);
 }
 
-int launch(char **args) {
+void reap_background_jobs(void) {
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (!jobs[i].active) {
+            continue;
+        }
+
+        int all_finished = 1;
+
+        for (int j = 0; j < jobs[i].process_count; j++) {
+            if (jobs[i].pids[j] == 0) {
+                continue;
+            }
+
+            int status;
+            pid_t result = waitpid(
+                jobs[i].pids[j], &status, WNOHANG
+            );
+
+            if (result == jobs[i].pids[j]) {
+                jobs[i].pids[j] = 0;
+            }
+            else if (result == 0) {
+                all_finished = 0;
+            }
+            else if (result < 0 && errno == EINTR) {
+                all_finished = 0;
+            }
+            else if (result < 0 && errno == ECHILD) {
+                jobs[i].pids[j] = 0;
+            }
+            else if (result < 0) {
+                perror("sheldon: waitpid");
+                jobs[i].pids[j] = 0;
+            }
+        }
+
+        if (all_finished) {
+            for (int j = 0; j < jobs[i].process_count; j++) {
+                if (jobs[i].pids[j] != 0) {
+                    all_finished = 0;
+                    break;
+                }
+            }
+        }
+
+        if (all_finished) {
+            printf("[%d] Done\t%s\n",
+                   jobs[i].id, jobs[i].command);
+
+            free(jobs[i].pids);
+            free(jobs[i].command);
+
+            jobs[i].pids = NULL;
+            jobs[i].command = NULL;
+            jobs[i].active = 0;
+            job_count--;
+        }
+    }
+}
+
+void list_jobs(void) {
+    reap_background_jobs();
+
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (jobs[i].active) {
+            printf("[%d] Running\t%s\n",
+                   jobs[i].id, jobs[i].command);
+        }
+    }
+}
+
+int wait_for_jobs(void) {
+    int final_status = 1;
+
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (!jobs[i].active) {
+            continue;
+        }
+
+        for (int j = 0; j < jobs[i].process_count; j++) {
+            if (jobs[i].pids[j] == 0) {
+                continue;
+            }
+
+            int status;
+            pid_t result;
+
+            do {
+                result = waitpid(
+                    jobs[i].pids[j], &status, 0
+                );
+            } while (result < 0 && errno == EINTR);
+
+            if (result < 0) {
+                perror("sheldon: waitpid");
+                final_status = 0;
+            }
+            else if (j == jobs[i].process_count - 1) {
+                final_status = WIFEXITED(status) &&
+                               WEXITSTATUS(status) == 0;
+            }
+
+            jobs[i].pids[j] = 0;
+        }
+
+        printf("[%d] Done\t%s\n",
+               jobs[i].id, jobs[i].command);
+
+        free(jobs[i].pids);
+        free(jobs[i].command);
+
+        jobs[i].pids = NULL;
+        jobs[i].command = NULL;
+        jobs[i].active = 0;
+        job_count--;
+    }
+
+    return final_status;
+}
+
+int register_job(pid_t *pids, int count, const char *command) {
+    if (job_count >= MAX_JOBS) {
+        fprintf(stderr, "sheldon: maximum background jobs reached\n");
+        return 0;
+    }
+
+    for (int i = 0; i < MAX_JOBS; i++) {
+        if (!jobs[i].active) {
+            jobs[i].id = next_job_id++;
+            jobs[i].pids = malloc(sizeof(pid_t) * count);
+            jobs[i].command = strdup(command);
+
+            if (jobs[i].pids == NULL ||
+                jobs[i].command == NULL) {
+                free(jobs[i].pids);
+                free(jobs[i].command);
+                jobs[i].pids = NULL;
+                jobs[i].command = NULL;
+                return 0;
+            }
+
+            memcpy(jobs[i].pids, pids, sizeof(pid_t) * count);
+            jobs[i].process_count = count;
+            jobs[i].active = 1;
+            job_count++;
+
+            printf("[%d] %d\n", jobs[i].id, pids[0]);
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+int launch(char **args, int background) {
     int command_count = 1;
 
     // Validate pipe syntax and count commands.
@@ -401,6 +568,30 @@ int launch(char **args) {
         free(commands);
         free(pids);
         return 1;
+    }
+
+        // Preserve the command before modifying its arguments.
+    size_t command_length = 1;
+
+    for (int i = 0; args[i] != NULL; i++) {
+        command_length += strlen(args[i]) + 1;
+    }
+
+    char *command_text = malloc(command_length);
+
+    if (command_text == NULL) {
+        perror("sheldon: malloc");
+        return 0;
+    }
+
+    command_text[0] = '\0';
+
+    for (int i = 0; args[i] != NULL; i++) {
+        if (i > 0) {
+            strcat(command_text, " ");
+        }
+
+        strcat(command_text, args[i]);
     }
 
     // Split arguments into individual commands.
@@ -497,7 +688,24 @@ int launch(char **args) {
         close(pipes[i][1]);
     }
 
-    // Wait for every child and capture the last command's status.
+    
+    // Background jobs return immediately without waiting.
+    if (background && started == command_count && !launch_failed) {
+        if (register_job(pids, started, command_text)) {
+            free(command_text);
+            free(pipes);
+            free(commands);
+            free(pids);
+            return 1;
+        }
+
+        // Registration failed; wait for children to avoid leaving zombies.
+        launch_failed = 1;
+    }
+
+    free(command_text);
+
+    // Wait for foreground processes or clean up after registration failure.
     int last_status = 1;
 
     for (int i = 0; i < started; i++) {
@@ -514,7 +722,7 @@ int launch(char **args) {
         }
         else if (i == started - 1) {
             last_status = WIFEXITED(status) &&
-                        WEXITSTATUS(status) == 0;
+                          WEXITSTATUS(status) == 0;
         }
     }
 
@@ -523,8 +731,8 @@ int launch(char **args) {
     free(pids);
 
     return (!launch_failed &&
-        started == command_count &&
-        last_status) ? 1 : 0;
+            started == command_count &&
+            last_status) ? 1 : 0;
 }
 
 int shell_cd(char **args) {
@@ -556,6 +764,8 @@ int shell_help(void) {
     printf("  cd [directory]   Change directory\n");
     printf("  help             Display this help\n");
     printf("  exit             Exit Shelly\n");
+    printf("  jobs             List background jobs\n");
+    printf("  wait             Wait for background jobs\n");
 
     return 1;
 }
@@ -571,18 +781,47 @@ int execute_segment(char **args) {
         return 1;
     }
 
+    int background = 0;
+    int count = 0;
+
+    while (args[count] != NULL) {
+        count++;
+    }
+
+    if (strcmp(args[count - 1], "&") == 0) {
+        background = 1;
+        args[count - 1] = NULL;
+    }
+
+    if (args[0] == NULL) {
+        return 1;
+    }
+
     if (strcmp(args[0], "exit") == 0) {
         shell_exit_requested = 1;
         return 1;
     }
     else if (strcmp(args[0], "cd") == 0) {
+        if (background) {
+            fprintf(stderr,
+                    "sheldon: cd cannot run in the background\n");
+            return 0;
+        }
+
         return shell_cd(args);
     }
     else if (strcmp(args[0], "help") == 0) {
         return shell_help();
     }
+    else if (strcmp(args[0], "jobs") == 0) {
+        list_jobs();
+        return 1;
+    }
+    else if (strcmp(args[0], "wait") == 0) {
+        return wait_for_jobs();
+    }
 
-    return launch(args);
+    return launch(args, background);
 }
 
 int execute_chain(char **args) {
@@ -876,6 +1115,8 @@ int main() {
     load_history();
 
     while (1) {
+        reap_background_jobs();
+
         char cwd[1024];
         char prompt[1200];
         char *home = getenv("HOME");
